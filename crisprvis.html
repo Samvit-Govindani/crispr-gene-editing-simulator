@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- CRISPR-Vis (hardened build) -->
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>CRISPR-Vis: Interactive Gene-Editing Simulator</title>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- three.js + OrbitControls (attempt) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" defer></script>
+  <!-- Primary source -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/examples/js/controls/OrbitControls.min.js" defer></script>
+  <!-- Backup source (some networks block cdnjs examples/ path) -->
+  <script>
+    // If cdnjs fails to attach OrbitControls, queue a backup loader
+    window.addEventListener('DOMContentLoaded', () => {
+      setTimeout(() => {
+        if (window.THREE && !THREE.OrbitControls) {
+          const s = document.createElement('script');
+          s.src = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js";
+          s.defer = true;
+          s.onload = () => console.info('[CRISPR-Vis] Loaded backup OrbitControls.');
+          document.head.appendChild(s);
+        }
+      }, 50);
+    });
+  </script>
+
+  <!-- GSAP -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.9.1/gsap.min.js" defer></script>
+
+  <!-- Inter font -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: 'Inter', sans-serif; background:#111827; }
+    .glass-panel { background: rgba(31,41,55,.6); backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,.08); border-radius: .75rem; }
+    #viewer { width:100%; height:100%; display:block; min-height:260px; }
+    .info-popup { transition: opacity .25s ease, transform .25s ease; }
+    .step-item.active    { background:#3b82f6; color:#fff; }
+    .step-item.completed { background:#16a34a; color:#fff; }
+    .loader{border:4px solid #f3f3f3;border-top:4px solid #3b82f6;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite;}
+    @keyframes spin { 0%{transform:rotate(0)} 100%{transform:rotate(360deg)} }
+    @media (prefers-reduced-motion: reduce){ .info-popup{transition:none} .loader{animation:none} }
+  </style>
+</head>
+<body class="text-gray-200 overflow-hidden">
+  <div id="app" class="h-screen w-screen flex flex-col md:flex-row p-4 gap-4">
+    <!-- Left Control Panel -->
+    <aside class="glass-panel w-full md:w-1/4 lg:w-1/5 flex flex-col p-4 shadow-2xl">
+      <div class="flex items-center border-b border-gray-700 pb-3 mb-4">
+        <svg class="w-8 h-8 text-blue-400 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L14.732 3.732z"/>
+        </svg>
+        <h1 class="text-xl font-bold">CRISPR-Vis</h1>
+      </div>
+
+      <div class="flex-grow overflow-y-auto pr-2 space-y-6">
+        <!-- Step 1: Gene Selection -->
+        <section>
+          <h2 class="font-semibold text-lg mb-2 text-blue-300">1) Select Target Gene</h2>
+          <p class="text-sm text-gray-400 mb-3">Choose a preset or paste your own DNA sequence.</p>
+          <label class="text-xs text-gray-400">Preset Genes</label>
+          <select id="gene-select" class="w-full mt-1 p-2 bg-gray-700 border border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="HBB">HBB (Sickle Cell Anemia)</option>
+            <option value="CFTR">CFTR (Cystic Fibrosis)</option>
+            <option value="HTT">HTT (Huntington's Disease)</option>
+          </select>
+
+          <!-- Custom sequence input -->
+          <details class="mt-3">
+            <summary class="cursor-pointer text-sm text-gray-300">Use custom DNA (A/T/C/G)</summary>
+            <textarea id="custom-seq" class="mt-2 w-full h-28 p-2 bg-gray-800 border border-gray-700 rounded text-xs"
+              placeholder="Paste uppercase DNA sequence (A/T/C/G) only"></textarea>
+            <div class="mt-2 flex gap-2">
+              <button id="load-custom-btn" class="bg-gray-200 text-gray-900 hover:bg-white px-3 py-1 rounded text-sm">Load Custom</button>
+              <button id="clear-custom-btn" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm">Clear</button>
+            </div>
+          </details>
+        </section>
+
+        <!-- PAM / Enzyme -->
+        <section>
+          <h2 class="font-semibold text-lg mb-2 text-blue-300">2) PAM / Enzyme</h2>
+          <label class="text-xs text-gray-400">Choose PAM</label>
+          <select id="pam-select" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md">
+            <option value="NGG" selected>SpCas9 (NGG)</option>
+            <option value="NGA">SpCas9 variant (NGA)</option>
+            <option value="NG">xCas9 broad (NG)</option>
+          </select>
+        </section>
+
+        <!-- Simulation Control -->
+        <section>
+          <h2 class="font-semibold text-lg mb-2 text-blue-300">3) Run Simulation</h2>
+          <p class="text-sm text-gray-400 mb-3">Click a magenta PAM site in the viewer, then run.</p>
+          <button id="run-simulation-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded disabled:bg-gray-500 disabled:cursor-not-allowed" disabled>
+            Run Editing Simulation
+          </button>
+          <div class="mt-2 grid grid-cols-2 gap-2">
+            <button id="reset-btn" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-3 rounded">Reset View</button>
+            <button id="snapshot-btn" class="bg-gray-200 hover:bg-white text-gray-900 font-semibold py-2 px-3 rounded">📸 Snapshot</button>
+          </div>
+        </section>
+
+        <!-- Steps -->
+        <section>
+          <h2 class="font-semibold text-lg mb-2 text-blue-300">4) Simulation Progress</h2>
+          <ul id="progress-steps" class="space-y-2 text-sm">
+            <li class="step-item p-2 rounded-md">1. gRNA Design</li>
+            <li class="step-item p-2 rounded-md">2. Cas9 Complex Binding</li>
+            <li class="step-item p-2 rounded-md">3. DNA Cleavage</li>
+            <li class="step-item p-2 rounded-md">4. Homology Directed Repair</li>
+            <li class="step-item p-2 rounded-md">5. Edit Complete</li>
+          </ul>
+        </section>
+
+        <!-- Export gRNA -->
+        <section>
+          <h2 class="font-semibold text-lg mb-2 text-blue-300">5) Export</h2>
+          <button id="export-grna-btn" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 px-4 rounded disabled:bg-gray-500 disabled:cursor-not-allowed" disabled>
+            ⬇️ Export gRNA (FASTA/JSON)
+          </button>
+        </section>
+      </div>
+
+      <div class="text-xs text-gray-500 pt-4 border-t border-gray-800 mt-4">
+        Educational simulator — not for clinical use. MIT License.
+      </div>
+    </aside>
+
+    <!-- Center 3D Viewer -->
+    <section class="glass-panel flex-grow relative overflow-hidden">
+      <div id="viewer" aria-label="3D DNA viewer" role="img"></div>
+      <div id="loading-overlay" class="absolute inset-0 bg-gray-900 bg-opacity-75 flex flex-col items-center justify-center z-50">
+        <div class="loader" aria-hidden="true"></div>
+        <p class="mt-4 text-lg font-semibold">Generating 3D DNA Model…</p>
+      </div>
+
+      <!-- Diagnostics -->
+      <div id="diag" class="absolute left-2 bottom-2 text-[11px] px-2 py-1 rounded bg-black/50 border border-white/10">
+        engine: <span id="diag-eng">init</span> • controls: <span id="diag-ctrl">?</span> • PAMs: <span id="diag-pam">0</span>
+        <button id="reload-btn" class="ml-2 bg-gray-700 hover:bg-gray-600 px-2 py-[1px] rounded">Reload Engine</button>
+      </div>
+    </section>
+
+    <!-- Right Info Panel -->
+    <aside class="glass-panel w-full md:w-1/4 lg:w-1/5 flex flex-col p-4 shadow-2xl">
+      <h2 class="text-xl font-bold border-b border-gray-700 pb-3 mb-4">Information & Analysis</h2>
+      <div id="info-content" class="flex-grow overflow-y-auto pr-2 space-y-4 text-sm leading-relaxed">
+        <div id="welcome-message">
+          <h3 class="font-semibold text-blue-300">Welcome to CRISPR-Vis</h3>
+          <p class="text-gray-300">Select a gene to begin. Click a highlighted PAM site (magenta) to design a gRNA and run a step-by-step animation.</p>
+        </div>
+        <div id="gene-info" class="hidden"></div>
+        <div id="pam-info" class="hidden"></div>
+        <div id="grna-info" class="hidden"></div>
+        <div id="off-target-analysis" class="hidden"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Popup -->
+  <div id="info-popup" class="info-popup pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 glass-panel p-5 max-w-md w-[92%] text-center shadow-2xl opacity:0 transform scale-95">
+    <h3 id="popup-title" class="text-lg font-bold text-blue-300 mb-2"></h3>
+    <p id="popup-content" class="text-gray-200 text-sm"></p>
+  </div>
+
+  <script>
+    // -------- Gene presets (toy) --------
+    const geneData = {
+      HBB: { name:"Hemoglobin Subunit Beta (HBB)", disorder:"Sickle Cell Anemia",
+        info:"HBB encodes beta-globin. A point mutation (A→T) can cause sickling.",
+        sequence:
+"CTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGTTGGTATCAAGGTTACAAGACAGGTTTAAGGAGACCAATAGAAACTGGGCATGTGGAGACAGAGAAGACTCTTGGGTTTCTGATAGGCACTGACTCTCTCTGCCTATTGGTCTATTTTCCCACCCTTAGGCTGCTGGTGGTCTACCCTTGGACCCAGAGGTTCTTTGAGTCCTTTGGGGATCTGTCCACTCCTGATGCTGTTATGGGCAACCCTAAGGTGAAGGCTCATGGCAAGAAAGTGCTCGGTGCCTTTAGTGATGGCCTGGCTCACCTGGACAACCTCAAGGGCACCTTTGCCACACTGAGTGAGCTGCACTGTGACAAGCTGCACGTGGATCCTGAGAACTTCAGGGTGAGTCTATGGGACGCTTGATGTTTTCTTTCCCCTTCTTTTCTATGGTTAAGTTCATGTCATAGGAAGGGGAGAAGTAACAGGGTACAGTTTAGAATGG"},
+      CFTR:{ name:"CFTR", disorder:"Cystic Fibrosis",
+        info:"CFTR encodes a chloride channel; ΔF508 is a common deletion.",
+        sequence:
+"AGAACTGGATCAGGAAGAACTTTCAAAGTTCTTAAATTCAGTGGTGTTTTTATTCTGTAATTGCTGCTTTATCTGTCTCTTACTCTTCTTTTAGCATAGGCAGACTGTCGATTCAGTTGTCACTGTGTATGATACATTTAGCTACATATAAATATTATCTTTCCTTTATTTTCCTTGTTTTGATTATGCATGTATTTTTATTTGTGAACATTTAATTAAACAAGTTTCACAAAGAAATTTATTTTTGCTATTGGAAACTTCTTACTGTTCTTTTCTAGTTTGTTTTTAATTTGCACCTGTAAATCACATTGAAAGCAATACAACTGAACATCTATACAAG"},
+      HTT: { name:"Huntingtin (HTT)", disorder:"Huntington's Disease",
+        info:"HTT contains a CAG repeat; disease is associated with >35 repeats.",
+        sequence:"ATGAAGGCCTTCGAGTCCCTCAAGTCCTTCCTGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCCGCTGCTGCTGCTGCTGCTGCTGCTGCTG" }
+    };
+
+    // -------- PAM regex --------
+    const pamRegex = { NGG:/[ATCG]GG/g, NGA:/[ATCG]GA/g, NG:/[ATCG]G/g };
+
+    // -------- State --------
+    let scene, camera, renderer, controls, fallbackControls = false;
+    let dnaGroup, cas9Model, gRNAStrand;
+    const basePairs = [];
+    const pamStarts = [];
+    let selectedPam, selectedPamIndex = null, isAnimating = false;
+
+    // UI refs
+    const runBtn = document.getElementById('run-simulation-btn');
+    const resetBtn = document.getElementById('reset-btn');
+    const snapshotBtn = document.getElementById('snapshot-btn');
+    const geneSelect = document.getElementById('gene-select');
+    const pamSelect = document.getElementById('pam-select');
+    const loadingOverlay = document.getElementById('loading-overlay');
+    const progressSteps = [...document.querySelectorAll('.step-item')];
+    const exportBtn = document.getElementById('export-grna-btn');
+    const customSeqTA = document.getElementById('custom-seq');
+    const loadCustomBtn = document.getElementById('load-custom-btn');
+    const clearCustomBtn= document.getElementById('clear-custom-btn');
+    const view = document.getElementById('viewer');
+    const diagEng = document.getElementById('diag-eng');
+    const diagCtrl= document.getElementById('diag-ctrl');
+    const diagPam = document.getElementById('diag-pam');
+    const reloadBtn = document.getElementById('reload-btn');
+
+    // Visual params
+    const baseColors = { A:0x00ff00, T:0xff4444, C:0x3399ff, G:0xffea00, PAM:0xff00ff };
+    const baseGeometry = new THREE.BoxGeometry(0.5,0.2,1);
+    const backboneGeometry = new THREE.CylinderGeometry(0.08,0.08,1.1,10);
+    const backboneMaterial = new THREE.MeshPhongMaterial({ color:0xaaaaaa, shininess:50 });
+
+    // Helpers (UI)
+    function setInfo(id, title, html){
+      ['welcome-message','gene-info','pam-info','grna-info','off-target-analysis']
+        .forEach(s => document.getElementById(s).classList.add('hidden'));
+      const t = document.getElementById(id);
+      t.innerHTML = `<h3 class="font-semibold text-blue-300 mb-1">${title}</h3><div class="text-gray-300">${html}</div>`;
+      t.classList.remove('hidden');
+    }
+    function popup(title,text,ms=2000){
+      const el = document.getElementById('info-popup');
+      document.getElementById('popup-title').textContent = title;
+      document.getElementById('popup-content').textContent = text;
+      el.style.opacity = 1; el.style.transform = 'scale(1)';
+      setTimeout(()=>{ el.style.opacity = 0; el.style.transform = 'scale(.95)'; }, ms);
+    }
+    function progress(idx, state='active'){
+      progressSteps.forEach((li,i)=>{
+        li.classList.remove('active','completed');
+        if(i < idx) li.classList.add('completed');
+        else if(i === idx) li.classList.add(state);
+      });
+    }
+    function resetProgress(){ progressSteps.forEach(li => li.classList.remove('active','completed')); }
+
+    // 3D creation
+    function basePairGroup(base1, base2, y, angle, isPam=false){
+      const g = new THREE.Group();
+      const mat1 = new THREE.MeshPhongMaterial({ color: baseColors[isPam ? 'PAM' : base1], shininess:80 });
+      const mat2 = new THREE.MeshPhongMaterial({ color: baseColors[isPam ? 'PAM' : base2], shininess:80 });
+      const mesh1 = new THREE.Mesh(baseGeometry, mat1); mesh1.position.z = -0.5;
+      const mesh2 = new THREE.Mesh(baseGeometry, mat2); mesh2.position.z =  0.5;
+      const bb1 = new THREE.Mesh(backboneGeometry, backboneMaterial); bb1.position.z = -1;
+      const bb2 = new THREE.Mesh(backboneGeometry, backboneMaterial); bb2.position.z =  1;
+      g.add(mesh1,mesh2,bb1,bb2);
+      g.position.y = y; g.rotation.y = angle;
+      g.userData = { type:'basepair', isPam };
+      mesh1.userData = g.userData; mesh2.userData = g.userData;
+      return g;
+    }
+
+    function createDNA(seq, pamPattern){
+      if (dnaGroup) scene.remove(dnaGroup);
+      dnaGroup = new THREE.Group();
+      basePairs.length = 0; pamStarts.length = 0;
+
+      const comp = { A:'T', T:'A', C:'G', G:'C' };
+      const R=5, yStep=1.2, angStep=Math.PI/10;
+
+      // Build helix
+      for (let i=0;i<seq.length;i++){
+        const b1 = seq[i]; const b2 = comp[b1] || 'A';
+        const y = -i*yStep; const a = i*angStep;
+        const g = basePairGroup(b1,b2,y,a,false);
+        g.position.x = R*Math.cos(a); g.position.z = R*Math.sin(a);
+        dnaGroup.add(g); basePairs.push(g);
+      }
+
+      // Mark PAMs
+      const re = (pamRegex[pamPattern] || pamRegex.NGG);
+      re.lastIndex = 0;
+      let m, count = 0;
+      while ((m = re.exec(seq)) !== null) {
+        const i = m.index;
+        const len = Math.min(Math.max(m[0].length,1),3);
+        for (let k=0;k<len;k++){
+          const gp = basePairs[i+k]; if(!gp) continue;
+          gp.userData.isPam = true;
+          if (gp.children[0]?.material) gp.children[0].material = new THREE.MeshPhongMaterial({ color:baseColors.PAM, shininess:80 });
+          if (gp.children[1]?.material) gp.children[1].material = new THREE.MeshPhongMaterial({ color:baseColors.PAM, shininess:80 });
+        }
+        if (basePairs[i]) pamStarts.push(i);
+        count++;
+      }
+      diagPam.textContent = String(count);
+      scene.add(dnaGroup);
+    }
+
+    function createCas9(){
+      const g = new THREE.Group();
+      const bodyMat = new THREE.MeshPhongMaterial({ color:0x3b82f6, transparent:true, opacity:.85, shininess:90 });
+      const body = new THREE.Mesh(new THREE.SphereGeometry(3,18,18), bodyMat);
+      const l1 = new THREE.Mesh(new THREE.SphereGeometry(2,18,18), bodyMat.clone()); l1.position.set(2,1,0);
+      const l2 = new THREE.Mesh(new THREE.SphereGeometry(1.6,18,18), bodyMat.clone()); l2.position.set(-2,-1,1);
+      g.add(body,l1,l2); g.scale.set(.01,.01,.01); g.visible=false; return g;
+    }
+    function createGRNA(){
+      const mat = new THREE.MeshBasicMaterial({ color:0xf472b6 });
+      const g = new THREE.Group();
+      for (let i=0;i<20;i++){ const s = new THREE.Mesh(new THREE.BoxGeometry(.1,.1,.5),mat); s.position.y = i*0.15; g.add(s); }
+      g.visible=false; return g;
+    }
+
+    // Engine
+    function init3D(){
+      if (!view.clientWidth || !view.clientHeight) {
+        // Force a size if layout is still stabilizing
+        view.style.minHeight = '300px';
+      }
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x111827);
+
+      camera = new THREE.PerspectiveCamera(70, view.clientWidth/view.clientHeight, .1, 2000);
+      camera.position.set(20,0,20);
+
+      renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+      if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+      renderer.setSize(view.clientWidth, view.clientHeight);
+      view.innerHTML = '';
+      view.appendChild(renderer.domElement);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 1.4));
+      const dir = new THREE.DirectionalLight(0xffffff,1.2); dir.position.set(10,10,10); scene.add(dir);
+
+      // Controls or fallback
+      try {
+        if (THREE.OrbitControls) {
+          controls = new THREE.OrbitControls(camera, renderer.domElement);
+          controls.enableDamping = true; controls.dampingFactor = 0.07;
+          controls.minDistance = 8; controls.maxDistance = 80;
+          fallbackControls = false;
+        } else {
+          fallbackControls = true;
+          enableFallbackControls();
+        }
+      } catch(e){
+        console.warn('[CRISPR-Vis] OrbitControls init failed, using fallback.', e);
+        fallbackControls = true;
+        enableFallbackControls();
+      }
+      diagCtrl.textContent = fallbackControls ? 'fallback' : 'orbit';
+
+      cas9Model = createCas9(); scene.add(cas9Model);
+      gRNAStrand = createGRNA(); scene.add(gRNAStrand);
+
+      window.addEventListener('resize', onResize, { passive:true });
+      view.addEventListener('click', onClick, { passive:true });
+
+      animate();
+    }
+    function onResize(){
+      if (!renderer) return;
+      const w = view.clientWidth || 640, h = view.clientHeight || 360;
+      camera.aspect = w/h; camera.updateProjectionMatrix();
+      renderer.setSize(w,h);
+    }
+    function animate(){
+      if (!renderer) return;
+      requestAnimationFrame(animate);
+      if (controls && controls.update) controls.update();
+      renderer.render(scene, camera);
+    }
+    function resetCamera(){ camera.position.set(20,0,20); camera.lookAt(scene.position); }
+
+    // Fallback mouse controls
+    function enableFallbackControls(){
+      let dragging = false, prev = {x:0,y:0};
+      view.addEventListener('mousedown', e => { if(isAnimating) return; dragging=true; prev={x:e.offsetX,y:e.offsetY}; });
+      window.addEventListener('mouseup', ()=> dragging=false);
+      view.addEventListener('mousemove', e => {
+        if (!dragging || isAnimating) return;
+        const dx = e.offsetX - prev.x, dy = e.offsetY - prev.y;
+        const q = new THREE.Quaternion().setFromEuler(new THREE.Euler((dy*Math.PI/180)/4, (dx*Math.PI/180)/4, 0, 'XYZ'));
+        camera.position.applyQuaternion(q); camera.lookAt(scene.position); prev={x:e.offsetX,y:e.offsetY};
+      }, { passive:true });
+      view.addEventListener('wheel', e => {
+        if (isAnimating) return;
+        camera.position.z += e.deltaY > 0 ? 1 : -1;
+        camera.position.x += e.deltaY > 0 ? 1 : -1;
+      }, { passive:true });
+    }
+
+    // Interaction & logic
+    const complementary = { A:'T', T:'A', C:'G', G:'C' };
+    let currentSeq = "", currentPam = "NGG";
+
+    function regenDNA(){
+      loadingOverlay.style.display = 'flex';
+      try {
+        const preset = geneData[geneSelect.value];
+        const custom = (customSeqTA.value || '').trim().toUpperCase().replace(/[^ATCG]/g,'');
+        currentSeq = custom.length >= 25 ? custom : preset.sequence;
+        currentPam = pamSelect.value || "NGG";
+        createDNA(currentSeq, currentPam);
+        selectedPam = null; selectedPamIndex = null;
+        runBtn.disabled = true; exportBtn.disabled = true; resetProgress(); resetCamera();
+        setInfo('gene-info', 'Gene Information',
+          `<b>${preset.name}</b><br>${preset.disorder}<br><br>${preset.info}
+           <br><br><span class="text-xs text-gray-400">Loaded: ${currentSeq.length} bp • PAM: ${currentPam}</span>`);
+        document.getElementById('welcome-message').classList.add('hidden');
+      } catch (e) {
+        console.error('[CRISPR-Vis] regenDNA error:', e);
+        popup('Engine error', 'Could not build DNA scene. See console for details.');
+      } finally {
+        loadingOverlay.style.display = 'none';
+        diagEng.textContent = 'ready';
+      }
+    }
+
+    function onClick(ev){
+      if (isAnimating || !dnaGroup) return;
+      const rect = view.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((ev.clientX - rect.left)/view.clientWidth)*2 - 1,
+        -((ev.clientY - rect.top)/view.clientHeight)*2 + 1
+      );
+      const ray = new THREE.Raycaster(); ray.setFromCamera(mouse, camera);
+      const hits = ray.intersectObjects(dnaGroup.children, true); if (!hits.length) return;
+      const idx = basePairs.indexOf(hits[0].object.parent); if (idx < 0) return;
+      if (!pamStarts.includes(idx)) return; // only PAM starts are clickable
+
+      // unhighlight
+      if (selectedPam) for (const c of selectedPam.children)
+        if (c.material?.emissive) c.material.emissive.setHex(0x000000);
+
+      selectedPam = basePairs[idx]; selectedPamIndex = idx;
+      for (const c of selectedPam.children)
+        if (c.material?.emissive) c.material.emissive.setHex(0x00ff00);
+
+      runBtn.disabled = false; exportBtn.disabled = false;
+      setInfo('pam-info', 'PAM Site Selected', `Start index <b>${idx}</b> (${currentPam}). Click “Run Editing Simulation”.`);
+      popup('PAM Selected', 'Ready to design gRNA and run simulation.', 1400);
+      showGrnaDesign(idx);
+    }
+
+    function extractSpacer(seq, pamStart, len=20){
+      const s = Math.max(0, pamStart - len), e = pamStart;
+      const p = seq.slice(s, e);
+      return p.padStart(len, 'N');
+    }
+    function reverseComplement(s){
+      const map = { A:'T', T:'A', C:'G', G:'C', N:'N' };
+      return s.split('').reverse().map(ch => map[ch] || 'N').join('');
+    }
+    function gcContent(s){ const gc = (s.match(/[GC]/g)||[]).length; return (100*gc/s.length)||0; }
+    function offTargetHeuristic(spacer){
+      const gc = gcContent(spacer), longRun = /(A{5,}|T{5,}|C{5,}|G{5,})/.test(spacer);
+      let risk='Low'; if (gc<35 || gc>70 || longRun) risk='Elevated'; return { risk, gc };
+    }
+    function showGrnaDesign(pamStartIdx){
+      const spacer = extractSpacer(currentSeq, pamStartIdx, 20);
+      const guide = reverseComplement(spacer);
+      const off = offTargetHeuristic(spacer);
+      setInfo('grna-info','gRNA Design',
+        `<b>20nt protospacer:</b> <code class="text-xs">${spacer}</code><br>
+         <b>Guide (reverse-complement):</b> <code class="text-xs">${guide}</code><br>
+         <b>GC%:</b> ${off.gc.toFixed(1)} • <b>Off-target risk (toy):</b> ${off.risk}`);
+      setInfo('off-target-analysis','Off-Target Analysis (Toy)',
+        `Simplified heuristic only — no genome search. Avoid long runs; aim for GC ≈ 40–60%.`);
+    }
+
+    function runSimulation(){
+      if(!selectedPam || selectedPamIndex==null || isAnimating) return;
+      isAnimating = true; runBtn.disabled=true; resetBtn.disabled=true; geneSelect.disabled=true; pamSelect.disabled=true;
+
+      const targetPos = selectedPam.position.clone();
+      const targetRot = selectedPam.rotation.clone();
+
+      const tl = gsap.timeline({
+        onComplete: () => {
+          isAnimating=false; resetBtn.disabled=false; geneSelect.disabled=false; pamSelect.disabled=false;
+          progress(4,'completed');
+          setInfo('gene-info','Editing Complete',
+            `Illustrative HDR complete. A toy repair step recolored and restored the cut site.`);
+        }
+      });
+
+      tl.call(()=>{
+        progress(0,'active'); popup('Step 1','Designing guide RNA…',1200);
+        gRNAStrand.position.copy(targetPos).y += 12; gRNAStrand.rotation.copy(targetRot); gRNAStrand.visible = true;
+        cas9Model.position.copy(targetPos).y += 24; cas9Model.visible = true; gsap.to(cas9Model.scale,{x:1,y:1,z:1,duration:.8});
+      });
+      tl.to(gRNAStrand.position,{ y: targetPos.y + 2, duration:1.4, ease:'power2.inOut' }, "+=0.5")
+        .call(()=>{
+          progress(1,'active'); popup('Step 2','Cas9:gRNA binding…',1200);
+          gRNAStrand.parent = cas9Model; gRNAStrand.position.set(0,1,0);
+        })
+        .to(cas9Model.position,{ x:targetPos.x,y:targetPos.y,z:targetPos.z, duration:1.8, ease:'power3.inOut' }, "-=0.4")
+        .to(cas9Model.rotation,{ y:targetRot.y, duration:1.6, ease:'power3.inOut' }, "<");
+      tl.call(()=>{
+        progress(2,'active'); popup('Step 3','DNA cleavage near PAM…',1200);
+        const cutIndex = Math.max(0, selectedPamIndex - 3);
+        const pair = basePairs[cutIndex];
+        if (pair){
+          gsap.to(pair.position,{ y: pair.position.y - .8, duration:.35, ease:'bounce.out' });
+          if (pair.children[0]) gsap.to(pair.children[0].position,{ z: -2, duration:.35 });
+          if (pair.children[1]) gsap.to(pair.children[1].position,{ z:  2, duration:.35 });
+        }
+      });
+      tl.to({}, { duration:1.2 })
+        .call(()=>{
+          progress(3,'active'); popup('Step 4','Homology-directed repair…',1200);
+          const cutIndex = Math.max(0, selectedPamIndex - 3);
+          const pair = basePairs[cutIndex];
+          if (pair){
+            for (const c of pair.children) if (c.material?.color) c.material.color.set(0x00ffff);
+            gsap.to(pair.position,{ y: pair.position.y + .8, duration:.7, ease:'elastic.out(1,0.4)' });
+            if (pair.children[0]) gsap.to(pair.children[0].position,{ z: -0.5, duration:.5 });
+            if (pair.children[1]) gsap.to(pair.children[1].position,{ z:  0.5, duration:.5 });
+          }
+        });
+      tl.to(cas9Model.position,{ y: "+=24", duration:1.0, ease:'power2.inOut' }, "+=0.6")
+        .to(cas9Model.scale,{ x:.01,y:.01,z:.01, duration:.5, onComplete:()=>{ cas9Model.visible=false; gRNAStrand.visible=false; }}, "-=0.5");
+    }
+
+    function exportGRNA(){
+      if (selectedPamIndex==null) return;
+      const spacer = extractSpacer(currentSeq, selectedPamIndex, 20);
+      const guide  = reverseComplement(spacer);
+      const gc     = gcContent(spacer);
+      const fasta = `>gRNA_spacer_20nt_PAM_${currentPam}_idx_${selectedPamIndex}\n${spacer}\n>gRNA_guide_RC\n${guide}\n`;
+      const json  = JSON.stringify({ pam:currentPam, pam_start_index:selectedPamIndex, spacer_20nt:spacer,
+        guide_reverse_complement:guide, gc_percent:Number(gc.toFixed(2)), sequence_length:currentSeq.length }, null, 2);
+      const b1 = new Blob([fasta], { type:'text/plain' }); const u1 = URL.createObjectURL(b1);
+      const a1 = Object.assign(document.createElement('a'), { href:u1, download:'grna.fasta' }); a1.click(); URL.revokeObjectURL(u1);
+      const b2 = new Blob([json], { type:'application/json' }); const u2 = URL.createObjectURL(b2);
+      const a2 = Object.assign(document.createElement('a'), { href:u2, download:'grna.json' }); a2.click(); URL.revokeObjectURL(u2);
+    }
+    function snapshot(){
+      const a = document.createElement('a'); a.download='crispr-vis-snapshot.png';
+      a.href = renderer.domElement.toDataURL('image/png'); a.click();
+    }
+
+    // Wiring
+    function bindUI(){
+      geneSelect.addEventListener('change', regenDNA);
+      pamSelect.addEventListener('change', regenDNA);
+      runBtn.addEventListener('click', runSimulation);
+      resetBtn.addEventListener('click', regenDNA);
+      snapshotBtn.addEventListener('click', snapshot);
+      exportBtn.addEventListener('click', exportGRNA);
+      document.getElementById('viewer').addEventListener('click', onClick, { passive:true });
+
+      document.getElementById('load-custom-btn').addEventListener('click', ()=>{
+        const s = customSeqTA.value.trim().toUpperCase();
+        if (s && !/^[ATCG]+$/.test(s)) { alert('Please paste only A/T/C/G (uppercase).'); return; }
+        regenDNA();
+      });
+      document.getElementById('clear-custom-btn').addEventListener('click', ()=>{
+        customSeqTA.value=''; regenDNA();
+      });
+      reloadBtn.addEventListener('click', ()=>{
+        try {
+          // Dispose and rebuild
+          scene = null; camera = null; renderer?.dispose?.();
+          renderer = null; controls = null;
+          diagEng.textContent = 'reloading';
+          init3D(); regenDNA();
+        } catch(e){ console.warn('Reload failed', e); diagEng.textContent = 'error'; }
+      });
+    }
+
+    // Boot
+    window.addEventListener('load', () => {
+      diagEng.textContent = 'boot';
+      try {
+        if (!window.THREE) throw new Error('three.js not loaded');
+        init3D(); bindUI(); regenDNA();
+        setInfo('welcome-message','Welcome',
+          'Select a gene, pick a PAM, click a magenta PAM site in the helix, then run the simulation.');
+        diagEng.textContent = 'ready';
+      } catch (e) {
+        console.error('[CRISPR-Vis] Fatal init error:', e);
+        diagEng.textContent = 'fatal';
+        loadingOverlay.style.display = 'none';
+        alert('Failed to load 3D engine. Check the console for details and internet access to CDNs.');
+      }
+    });
+  </script>
+</body>
+</html>
